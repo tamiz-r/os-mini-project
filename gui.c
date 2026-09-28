@@ -1,12 +1,15 @@
 
 #include <gtk/gtk.h>
 #include <stdio.h>
-#include <string.h>
 
 /* Global widgets */
+static GtkWidget *window;
+static GtkWidget *file_list;
+static GtkWidget *path_entry;
 static GtkLabel *status_label;
-static GtkWidget *file_entry;
-static GtkWidget *content_view;
+static GtkWidget *location_label;
+
+static char *current_path = NULL;
 
 /* Update status message */
 static void set_status(const char *message)
@@ -14,173 +17,93 @@ static void set_status(const char *message)
     gtk_label_set_text(status_label, message);
 }
 
-/* Get filename or directory path */
-static const char *get_path(void)
+/* Clear file list */
+static void clear_file_list(void)
 {
-    return gtk_editable_get_text(GTK_EDITABLE(file_entry));
+    GtkWidget *child;
+
+    while ((child = gtk_widget_get_first_child(file_list)) != NULL)
+        gtk_list_box_remove(GTK_LIST_BOX(file_list), child);
 }
 
-/* Get text from editor */
-static char *get_editor_text(void)
+/* Navigate to a directory */
+static void navigate_to(const char *path);
+
+/* Open a directory when a row is activated */
+static void on_row_activated(GtkListBox *box,
+                             GtkListBoxRow *row,
+                             gpointer data)
 {
-    GtkTextBuffer *buffer =
-        gtk_text_view_get_buffer(GTK_TEXT_VIEW(content_view));
+    const char *path =
+        g_object_get_data(G_OBJECT(row), "file-path");
 
-    GtkTextIter start, end;
-    gtk_text_buffer_get_bounds(buffer, &start, &end);
+    gboolean is_directory =
+        GPOINTER_TO_INT(
+            g_object_get_data(G_OBJECT(row), "is-directory"));
 
-    return gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
+    if (is_directory && path != NULL) {
+        navigate_to(path);
+    } else {
+        set_status("Selected file. File editing will be added next.");
+    }
 }
 
-/* Replace editor content */
-static void set_editor_text(const char *text)
+/* Add a file or directory row */
+static void add_file_row(const char *name,
+                         const char *path,
+                         gboolean is_directory)
 {
-    GtkTextBuffer *buffer =
-        gtk_text_view_get_buffer(GTK_TEXT_VIEW(content_view));
+    GtkWidget *row = gtk_list_box_row_new();
+    GtkWidget *box =
+        gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
 
-    gtk_text_buffer_set_text(buffer, text, -1);
+    GtkWidget *icon = gtk_image_new_from_icon_name(
+        is_directory ? "folder-symbolic"
+                     : "text-x-generic-symbolic");
+
+    GtkWidget *label = gtk_label_new(name);
+
+    gtk_widget_set_margin_start(box, 12);
+    gtk_widget_set_margin_end(box, 12);
+    gtk_widget_set_margin_top(box, 8);
+    gtk_widget_set_margin_bottom(box, 8);
+
+    gtk_label_set_xalign(GTK_LABEL(label), 0);
+    gtk_widget_set_hexpand(label, TRUE);
+
+    gtk_box_append(GTK_BOX(box), icon);
+    gtk_box_append(GTK_BOX(box), label);
+
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
+
+    g_object_set_data_full(
+        G_OBJECT(row), "file-path", g_strdup(path), g_free);
+
+    g_object_set_data(
+        G_OBJECT(row), "is-directory",
+        GINT_TO_POINTER(is_directory));
+
+    gtk_list_box_append(GTK_LIST_BOX(file_list), row);
 }
 
-/* CREATE FILE */
-static void create_file(void)
+/* Refresh the current directory */
+static void refresh_directory(void)
 {
-    const char *path = get_path();
-
-    if (path[0] == '\0') {
-        set_status("Error: Enter a file name.");
+    if (current_path == NULL)
         return;
-    }
 
-    if (g_file_test(path, G_FILE_TEST_EXISTS)) {
-        set_status("Error: File already exists.");
-        return;
-    }
+    clear_file_list();
 
-    GError *error = NULL;
-
-    if (!g_file_set_contents(path, "", 0, &error)) {
-        set_status(error->message);
-        g_error_free(error);
-        return;
-    }
-
-    set_status("Success: File created.");
-}
-
-/* READ FILE */
-static void read_file(void)
-{
-    const char *path = get_path();
-
-    if (path[0] == '\0') {
-        set_status("Error: Enter a file name.");
-        return;
-    }
-
-    gchar *contents = NULL;
-    gsize length = 0;
-    GError *error = NULL;
-
-    if (!g_file_get_contents(path, &contents, &length, &error)) {
-        set_status(error->message);
-        g_error_free(error);
-        return;
-    }
-
-    set_editor_text(contents);
-    g_free(contents);
-
-    set_status("Success: File read.");
-}
-
-/* WRITE FILE */
-static void write_file(void)
-{
-    const char *path = get_path();
-
-    if (path[0] == '\0') {
-        set_status("Error: Enter a file name.");
-        return;
-    }
-
-    char *content = get_editor_text();
-    GError *error = NULL;
-
-    if (!g_file_set_contents(path, content, -1, &error)) {
-        set_status(error->message);
-        g_error_free(error);
-        g_free(content);
-        return;
-    }
-
-    g_free(content);
-    set_status("Success: File saved.");
-}
-
-/* DELETE FILE */
-static void delete_file(void)
-{
-    const char *path = get_path();
-
-    if (path[0] == '\0') {
-        set_status("Error: Enter a file name.");
-        return;
-    }
-
-    GError *error = NULL;
-
-    if (!g_file_delete(g_file_new_for_path(path), NULL, &error)) {
-        set_status(error->message);
-        g_error_free(error);
-        return;
-    }
-
-    set_status("Success: File deleted.");
-}
-
-/* CREATE DIRECTORY */
-static void create_directory(void)
-{
-    const char *path = get_path();
-
-    if (path[0] == '\0') {
-        set_status("Error: Enter a directory name.");
-        return;
-    }
-
-    GError *error = NULL;
-
-    if (!g_file_make_directory(g_file_new_for_path(path),
-                               NULL, &error)) {
-        set_status(error->message);
-        g_error_free(error);
-        return;
-    }
-
-    set_status("Success: Directory created.");
-}
-
-/* LIST DIRECTORY */
-static void list_directory(void)
-{
-    const char *path = get_path();
-
-    if (path[0] == '\0') {
-        set_status("Error: Enter a directory path.");
-        return;
-    }
-
-    GFile *directory = g_file_new_for_path(path);
+    GFile *directory = g_file_new_for_path(current_path);
     GError *error = NULL;
 
     GFileEnumerator *enumerator =
         g_file_enumerate_children(
             directory,
-            G_FILE_ATTRIBUTE_STANDARD_NAME,
+            "standard::name,standard::type",
             G_FILE_QUERY_INFO_NONE,
             NULL,
-            &error
-        );
+            &error);
 
     if (enumerator == NULL) {
         set_status(error->message);
@@ -189,68 +112,140 @@ static void list_directory(void)
         return;
     }
 
-    GString *listing = g_string_new("");
-
+    int count = 0;
     GFileInfo *info;
 
     while ((info = g_file_enumerator_next_file(
                 enumerator, NULL, &error)) != NULL) {
 
         const char *name = g_file_info_get_name(info);
-        g_string_append_printf(listing, "%s\n", name);
+
+        if (name != NULL) {
+            char *child_path =
+                g_build_filename(current_path, name, NULL);
+
+            gboolean is_directory =
+                g_file_info_get_file_type(info) ==
+                G_FILE_TYPE_DIRECTORY;
+
+            add_file_row(name, child_path, is_directory);
+
+            g_free(child_path);
+            count++;
+        }
+
         g_object_unref(info);
     }
-
-    g_object_unref(enumerator);
-    g_object_unref(directory);
 
     if (error != NULL) {
         set_status(error->message);
         g_error_free(error);
-        g_string_free(listing, TRUE);
+    } else {
+        char *message =
+            g_strdup_printf("%d items", count);
+
+        set_status(message);
+        g_free(message);
+    }
+
+    g_object_unref(enumerator);
+    g_object_unref(directory);
+}
+
+/* Navigate to a directory */
+static void navigate_to(const char *path)
+{
+    if (path == NULL || path[0] == '\0')
+        return;
+
+    GFile *file = g_file_new_for_path(path);
+
+    /* Correct directory validation */
+    if (g_file_query_file_type(
+            file, G_FILE_QUERY_INFO_NONE, NULL)
+            != G_FILE_TYPE_DIRECTORY) {
+
+        g_object_unref(file);
+        set_status("Invalid directory.");
         return;
     }
 
-    set_editor_text(listing->str);
-    g_string_free(listing, TRUE);
+    g_free(current_path);
+    current_path = g_strdup(path);
 
-    set_status("Success: Directory listed.");
+    gtk_editable_set_text(
+        GTK_EDITABLE(path_entry), current_path);
+
+    gtk_label_set_text(
+        GTK_LABEL(location_label), current_path);
+
+    g_object_unref(file);
+
+    refresh_directory();
 }
 
-/* Button callback */
-static void on_operation_clicked(GtkButton *button,
-                                 gpointer user_data)
+/* Location entry */
+static void on_path_enter(GtkEntry *entry, gpointer data)
 {
-    const char *operation = user_data;
+    const char *path =
+        gtk_editable_get_text(GTK_EDITABLE(entry));
 
-    if (g_strcmp0(operation, "Create") == 0)
-        create_file();
-
-    else if (g_strcmp0(operation, "Read") == 0)
-        read_file();
-
-    else if (g_strcmp0(operation, "Write") == 0)
-        write_file();
-
-    else if (g_strcmp0(operation, "Delete") == 0)
-        delete_file();
-
-    else if (g_strcmp0(operation, "Create Directory") == 0)
-        create_directory();
-
-    else if (g_strcmp0(operation, "List Directory") == 0)
-        list_directory();
+    navigate_to(path);
 }
 
-/* Create button */
-static GtkWidget *create_button(const char *label,
-                                const char *operation)
+/* Sidebar navigation */
+static void on_sidebar_clicked(GtkButton *button, gpointer data)
 {
-    GtkWidget *button = gtk_button_new_with_label(label);
+    const char *path = data;
+    navigate_to(path);
+}
 
-    g_signal_connect(button, "clicked",
-                     G_CALLBACK(on_operation_clicked),
-                     (gpointer)operation);
+/* Go to parent directory */
+static void on_up_clicked(GtkButton *button, gpointer data)
+{
+    if (current_path == NULL)
+        return;
+
+    char *parent = g_path_get_dirname(current_path);
+
+    navigate_to(parent);
+
+    g_free(parent);
+}
+
+/* Refresh button */
+static void on_refresh_clicked(GtkButton *button, gpointer data)
+{
+    refresh_directory();
+}
+
+/* Create sidebar button */
+static GtkWidget *create_sidebar_button(
+    const char *label,
+    const char *icon_name,
+    const char *path)
+{
+    GtkWidget *button = gtk_button_new();
+    GtkWidget *box =
+        gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+
+    GtkWidget *icon =
+        gtk_image_new_from_icon_name(icon_name);
+
+    GtkWidget *text = gtk_label_new(label);
+
+    gtk_label_set_xalign(GTK_LABEL(text), 0);
+    gtk_widget_set_hexpand(text, TRUE);
+
+    gtk_box_append(GTK_BOX(box), icon);
+    gtk_box_append(GTK_BOX(box), text);
+
+    gtk_button_set_child(GTK_BUTTON(button), box);
+
+    g_signal_connect(
+        button, "clicked",
+        G_CALLBACK(on_sidebar_clicked),
+        (gpointer)path);
 
     return button;
 }
@@ -258,97 +253,185 @@ static GtkWidget *create_button(const char *label,
 /* Main window */
 static void activate(GtkApplication *app, gpointer user_data)
 {
-    GtkWidget *window;
-    GtkWidget *main_box;
-    GtkWidget *button_box;
-    GtkWidget *dir_box;
-    GtkWidget *content_label;
-    GtkWidget *name_label;
-    GtkWidget *scroll;
-
     window = gtk_application_window_new(app);
 
-    gtk_window_set_title(GTK_WINDOW(window),
-                         "File System Interface");
+    gtk_window_set_title(
+        GTK_WINDOW(window), "File System Interface");
 
-    gtk_window_set_default_size(GTK_WINDOW(window), 800, 550);
+    gtk_window_set_default_size(
+        GTK_WINDOW(window), 1000, 650);
 
-    main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-
-    gtk_widget_set_margin_start(main_box, 20);
-    gtk_widget_set_margin_end(main_box, 20);
-    gtk_widget_set_margin_top(main_box, 20);
-    gtk_widget_set_margin_bottom(main_box, 20);
+    /* Main layout */
+    GtkWidget *main_box =
+        gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 
     gtk_window_set_child(GTK_WINDOW(window), main_box);
 
-    /* Filename input */
-    name_label = gtk_label_new("File Name / Directory Path:");
-    gtk_label_set_xalign(GTK_LABEL(name_label), 0);
-    gtk_box_append(GTK_BOX(main_box), name_label);
+    /* Toolbar */
+    GtkWidget *toolbar =
+        gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
 
-    file_entry = gtk_entry_new();
+    gtk_widget_set_margin_start(toolbar, 12);
+    gtk_widget_set_margin_end(toolbar, 12);
+    gtk_widget_set_margin_top(toolbar, 10);
+    gtk_widget_set_margin_bottom(toolbar, 10);
+
+    gtk_box_append(GTK_BOX(main_box), toolbar);
+
+    GtkWidget *up_button =
+        gtk_button_new_from_icon_name("go-up-symbolic");
+
+    gtk_widget_set_tooltip_text(
+        up_button, "Go to parent folder");
+
+    g_signal_connect(
+        up_button, "clicked",
+        G_CALLBACK(on_up_clicked), NULL);
+
+    gtk_box_append(GTK_BOX(toolbar), up_button);
+
+    path_entry = gtk_entry_new();
+
     gtk_entry_set_placeholder_text(
-        GTK_ENTRY(file_entry), "Enter file name or directory path..."
-    );
+        GTK_ENTRY(path_entry), "Enter directory path");
 
-    gtk_box_append(GTK_BOX(main_box), file_entry);
+    gtk_widget_set_hexpand(path_entry, TRUE);
 
-    /* File operations */
-    GtkWidget *file_label = gtk_label_new("File Operations");
-    gtk_label_set_xalign(GTK_LABEL(file_label), 0);
-    gtk_box_append(GTK_BOX(main_box), file_label);
+    g_signal_connect(
+        path_entry, "activate",
+        G_CALLBACK(on_path_enter), NULL);
 
-    button_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_box_append(GTK_BOX(main_box), button_box);
+    gtk_box_append(GTK_BOX(toolbar), path_entry);
 
-    gtk_box_append(GTK_BOX(button_box),
-                   create_button("Create", "Create"));
+    GtkWidget *refresh_button =
+        gtk_button_new_from_icon_name("view-refresh-symbolic");
 
-    gtk_box_append(GTK_BOX(button_box),
-                   create_button("Read", "Read"));
+    gtk_widget_set_tooltip_text(
+        refresh_button, "Refresh");
 
-    gtk_box_append(GTK_BOX(button_box),
-                   create_button("Write", "Write"));
+    g_signal_connect(
+        refresh_button, "clicked",
+        G_CALLBACK(on_refresh_clicked), NULL);
 
-    gtk_box_append(GTK_BOX(button_box),
-                   create_button("Delete", "Delete"));
+    gtk_box_append(GTK_BOX(toolbar), refresh_button);
 
-    /* Directory operations */
-    dir_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_box_append(GTK_BOX(main_box), dir_box);
+    /* Main content area */
+    GtkWidget *content =
+        gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
 
-    gtk_box_append(GTK_BOX(dir_box),
-                   create_button("Create Directory",
-                                 "Create Directory"));
+    gtk_widget_set_vexpand(content, TRUE);
 
-    gtk_box_append(GTK_BOX(dir_box),
-                   create_button("List Directory",
-                                 "List Directory"));
+    gtk_box_append(GTK_BOX(main_box), content);
 
-    /* Content editor */
-    content_label = gtk_label_new("File Content:");
-    gtk_label_set_xalign(GTK_LABEL(content_label), 0);
-    gtk_box_append(GTK_BOX(main_box), content_label);
+    /* Sidebar */
+    GtkWidget *sidebar =
+        gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
 
-    content_view = gtk_text_view_new();
-    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(content_view),
-                                GTK_WRAP_WORD_CHAR);
+    gtk_widget_set_size_request(sidebar, 210, -1);
+    gtk_widget_set_margin_start(sidebar, 12);
+    gtk_widget_set_margin_end(sidebar, 12);
+    gtk_widget_set_margin_top(sidebar, 12);
 
-    scroll = gtk_scrolled_window_new();
+    gtk_box_append(GTK_BOX(content), sidebar);
+
+    GtkWidget *places_label = gtk_label_new("Places");
+
+    gtk_label_set_xalign(GTK_LABEL(places_label), 0);
+
+    gtk_box_append(GTK_BOX(sidebar), places_label);
+
+    const char *home = g_get_home_dir();
+
+    char *documents =
+        g_build_filename(home, "Documents", NULL);
+
+    char *downloads =
+        g_build_filename(home, "Downloads", NULL);
+
+    gtk_box_append(
+        GTK_BOX(sidebar),
+        create_sidebar_button(
+            "Home", "user-home-symbolic", home));
+
+    gtk_box_append(
+        GTK_BOX(sidebar),
+        create_sidebar_button(
+            "Documents", "folder-documents-symbolic",
+            documents));
+
+    gtk_box_append(
+        GTK_BOX(sidebar),
+        create_sidebar_button(
+            "Downloads", "folder-download-symbolic",
+            downloads));
+
+    g_free(documents);
+    g_free(downloads);
+
+    /* Separator */
+    GtkWidget *separator =
+        gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+
+    gtk_box_append(GTK_BOX(content), separator);
+
+    /* File browser */
+    GtkWidget *browser =
+        gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+
+    gtk_widget_set_hexpand(browser, TRUE);
+    gtk_widget_set_vexpand(browser, TRUE);
+
+    gtk_widget_set_margin_start(browser, 16);
+    gtk_widget_set_margin_end(browser, 16);
+    gtk_widget_set_margin_top(browser, 12);
+    gtk_widget_set_margin_bottom(browser, 12);
+
+    gtk_box_append(GTK_BOX(content), browser);
+
+    location_label = gtk_label_new("Home");
+
+    gtk_label_set_xalign(GTK_LABEL(location_label), 0);
+
+    gtk_box_append(GTK_BOX(browser), location_label);
+
+    GtkWidget *scroll = gtk_scrolled_window_new();
+
     gtk_widget_set_vexpand(scroll, TRUE);
 
+    file_list = gtk_list_box_new();
+
+    gtk_list_box_set_selection_mode(
+        GTK_LIST_BOX(file_list), GTK_SELECTION_SINGLE);
+
+    g_signal_connect(
+        file_list, "row-activated",
+        G_CALLBACK(on_row_activated), NULL);
+
     gtk_scrolled_window_set_child(
-        GTK_SCROLLED_WINDOW(scroll), content_view);
+        GTK_SCROLLED_WINDOW(scroll), file_list);
 
-    gtk_box_append(GTK_BOX(main_box), scroll);
+    gtk_box_append(GTK_BOX(browser), scroll);
 
-    /* Status */
-    status_label = GTK_LABEL(gtk_label_new("Status: Ready"));
+    /* Status bar */
+    status_label =
+        GTK_LABEL(gtk_label_new("Ready"));
+
+    gtk_widget_set_margin_start(
+        GTK_WIDGET(status_label), 12);
+
+    gtk_widget_set_margin_top(
+        GTK_WIDGET(status_label), 8);
+
+    gtk_widget_set_margin_bottom(
+        GTK_WIDGET(status_label), 8);
+
     gtk_label_set_xalign(status_label, 0);
 
-    gtk_box_append(GTK_BOX(main_box),
-                   GTK_WIDGET(status_label));
+    gtk_box_append(
+        GTK_BOX(main_box), GTK_WIDGET(status_label));
+
+    /* Start in home directory */
+    navigate_to(home);
 
     gtk_window_present(GTK_WINDOW(window));
 }
@@ -356,21 +439,18 @@ static void activate(GtkApplication *app, gpointer user_data)
 /* Main function */
 int main(int argc, char **argv)
 {
-    GtkApplication *app;
-    int status;
-
-    app = gtk_application_new(
+    GtkApplication *app = gtk_application_new(
         "com.osproject.filesystem",
-        G_APPLICATION_DEFAULT_FLAGS
-    );
+        G_APPLICATION_DEFAULT_FLAGS);
 
-    g_signal_connect(app, "activate",
-                     G_CALLBACK(activate), NULL);
+    g_signal_connect(
+        app, "activate",
+        G_CALLBACK(activate), NULL);
 
-    status = g_application_run(
-        G_APPLICATION(app), argc, argv
-    );
+    int status = g_application_run(
+        G_APPLICATION(app), argc, argv);
 
+    g_free(current_path);
     g_object_unref(app);
 
     return status;
