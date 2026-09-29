@@ -1,457 +1,505 @@
-
 #include <gtk/gtk.h>
+#include <glib/gstdio.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
-/* Global widgets */
-static GtkWidget *window;
-static GtkWidget *file_list;
-static GtkWidget *path_entry;
-static GtkLabel *status_label;
-static GtkWidget *location_label;
+typedef struct {
+    GtkWidget *window, *list, *path_entry, *status;
+    gchar *current_path;
+} App;
 
-static char *current_path = NULL;
+typedef struct {
+    App *app;
+    gchar *action;
+    gchar *old_name;
+} PromptData;
 
-/* Update status message */
-static void set_status(const char *message)
+typedef struct {
+    App *app;
+    gchar *filepath;
+    GtkWidget *text_view;
+} EditorData;
+
+static void refresh_files(App *app);
+static void show_editor(App *app, const gchar *filepath);
+static void show_prompt(App *app, const gchar *action,
+                        const gchar *old_name);
+
+static void set_status(App *app, const gchar *message)
 {
-    gtk_label_set_text(status_label, message);
+    gtk_label_set_text(GTK_LABEL(app->status), message);
 }
 
-/* Clear file list */
-static void clear_file_list(void)
+static gchar *full_path(App *app, const gchar *name)
+{
+    return g_build_filename(app->current_path, name, NULL);
+}
+
+static gchar *selected_name(App *app)
+{
+    GtkListBoxRow *row = gtk_list_box_get_selected_row(
+        GTK_LIST_BOX(app->list));
+
+    if (!row)
+        return NULL;
+
+    return g_strdup(g_object_get_data(
+        G_OBJECT(row), "filename"));
+}
+
+static void refresh_files(App *app)
 {
     GtkWidget *child;
 
-    while ((child = gtk_widget_get_first_child(file_list)) != NULL)
-        gtk_list_box_remove(GTK_LIST_BOX(file_list), child);
-}
+    while ((child = gtk_widget_get_first_child(app->list)))
+        gtk_list_box_remove(GTK_LIST_BOX(app->list), child);
 
-/* Navigate to a directory */
-static void navigate_to(const char *path);
+    GDir *dir = g_dir_open(app->current_path, 0, NULL);
 
-/* Open a directory when a row is activated */
-static void on_row_activated(GtkListBox *box,
-                             GtkListBoxRow *row,
-                             gpointer data)
-{
-    const char *path =
-        g_object_get_data(G_OBJECT(row), "file-path");
-
-    gboolean is_directory =
-        GPOINTER_TO_INT(
-            g_object_get_data(G_OBJECT(row), "is-directory"));
-
-    if (is_directory && path != NULL) {
-        navigate_to(path);
-    } else {
-        set_status("Selected file. File editing will be added next.");
-    }
-}
-
-/* Add a file or directory row */
-static void add_file_row(const char *name,
-                         const char *path,
-                         gboolean is_directory)
-{
-    GtkWidget *row = gtk_list_box_row_new();
-    GtkWidget *box =
-        gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-
-    GtkWidget *icon = gtk_image_new_from_icon_name(
-        is_directory ? "folder-symbolic"
-                     : "text-x-generic-symbolic");
-
-    GtkWidget *label = gtk_label_new(name);
-
-    gtk_widget_set_margin_start(box, 12);
-    gtk_widget_set_margin_end(box, 12);
-    gtk_widget_set_margin_top(box, 8);
-    gtk_widget_set_margin_bottom(box, 8);
-
-    gtk_label_set_xalign(GTK_LABEL(label), 0);
-    gtk_widget_set_hexpand(label, TRUE);
-
-    gtk_box_append(GTK_BOX(box), icon);
-    gtk_box_append(GTK_BOX(box), label);
-
-    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
-
-    g_object_set_data_full(
-        G_OBJECT(row), "file-path", g_strdup(path), g_free);
-
-    g_object_set_data(
-        G_OBJECT(row), "is-directory",
-        GINT_TO_POINTER(is_directory));
-
-    gtk_list_box_append(GTK_LIST_BOX(file_list), row);
-}
-
-/* Refresh the current directory */
-static void refresh_directory(void)
-{
-    if (current_path == NULL)
-        return;
-
-    clear_file_list();
-
-    GFile *directory = g_file_new_for_path(current_path);
-    GError *error = NULL;
-
-    GFileEnumerator *enumerator =
-        g_file_enumerate_children(
-            directory,
-            "standard::name,standard::type",
-            G_FILE_QUERY_INFO_NONE,
-            NULL,
-            &error);
-
-    if (enumerator == NULL) {
-        set_status(error->message);
-        g_error_free(error);
-        g_object_unref(directory);
+    if (!dir) {
+        set_status(app, "Cannot open directory.");
         return;
     }
 
-    int count = 0;
-    GFileInfo *info;
+    const gchar *name;
 
-    while ((info = g_file_enumerator_next_file(
-                enumerator, NULL, &error)) != NULL) {
+    while ((name = g_dir_read_name(dir))) {
+        gchar *path = full_path(app, name);
+        gboolean is_dir = g_file_test(path, G_FILE_TEST_IS_DIR);
 
-        const char *name = g_file_info_get_name(info);
+        GtkWidget *row = gtk_list_box_row_new();
+        GtkWidget *label = gtk_label_new(NULL);
+        gchar *text = g_strdup_printf("%s  %s",
+            is_dir ? "📁" : "📄", name);
 
-        if (name != NULL) {
-            char *child_path =
-                g_build_filename(current_path, name, NULL);
+        gtk_label_set_text(GTK_LABEL(label), text);
+        gtk_label_set_xalign(GTK_LABEL(label), 0);
+        gtk_widget_set_margin_start(label, 10);
+        gtk_widget_set_margin_end(label, 10);
+        gtk_widget_set_margin_top(label, 6);
+        gtk_widget_set_margin_bottom(label, 6);
 
-            gboolean is_directory =
-                g_file_info_get_file_type(info) ==
-                G_FILE_TYPE_DIRECTORY;
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), label);
 
-            add_file_row(name, child_path, is_directory);
+        g_object_set_data_full(
+            G_OBJECT(row), "filename", g_strdup(name), g_free);
+        g_object_set_data(
+            G_OBJECT(row), "is-dir", GINT_TO_POINTER(is_dir));
 
-            g_free(child_path);
-            count++;
-        }
+        gtk_list_box_append(GTK_LIST_BOX(app->list), row);
 
-        g_object_unref(info);
+        g_free(text);
+        g_free(path);
     }
 
-    if (error != NULL) {
-        set_status(error->message);
-        g_error_free(error);
-    } else {
-        char *message =
-            g_strdup_printf("%d items", count);
-
-        set_status(message);
-        g_free(message);
-    }
-
-    g_object_unref(enumerator);
-    g_object_unref(directory);
-}
-
-/* Navigate to a directory */
-static void navigate_to(const char *path)
-{
-    if (path == NULL || path[0] == '\0')
-        return;
-
-    GFile *file = g_file_new_for_path(path);
-
-    /* Correct directory validation */
-    if (g_file_query_file_type(
-            file, G_FILE_QUERY_INFO_NONE, NULL)
-            != G_FILE_TYPE_DIRECTORY) {
-
-        g_object_unref(file);
-        set_status("Invalid directory.");
-        return;
-    }
-
-    g_free(current_path);
-    current_path = g_strdup(path);
+    g_dir_close(dir);
 
     gtk_editable_set_text(
-        GTK_EDITABLE(path_entry), current_path);
+        GTK_EDITABLE(app->path_entry), app->current_path);
 
-    gtk_label_set_text(
-        GTK_LABEL(location_label), current_path);
-
-    g_object_unref(file);
-
-    refresh_directory();
+    set_status(app, "Directory loaded.");
 }
 
-/* Location entry */
-static void on_path_enter(GtkEntry *entry, gpointer data)
+static void editor_response(GtkDialog *dialog, int response,
+                            gpointer user_data)
 {
-    const char *path =
-        gtk_editable_get_text(GTK_EDITABLE(entry));
+    EditorData *data = user_data;
 
-    navigate_to(path);
+    if (response == GTK_RESPONSE_ACCEPT) {
+        GtkTextBuffer *buffer = gtk_text_view_get_buffer(
+            GTK_TEXT_VIEW(data->text_view));
+
+        GtkTextIter start, end;
+        gtk_text_buffer_get_bounds(buffer, &start, &end);
+
+        gchar *text = gtk_text_buffer_get_text(
+            buffer, &start, &end, FALSE);
+
+        GError *error = NULL;
+
+        if (g_file_set_contents(data->filepath, text, -1, &error)) {
+            set_status(data->app, "File saved successfully.");
+        } else {
+            set_status(data->app, error->message);
+            g_error_free(error);
+        }
+
+        g_free(text);
+        refresh_files(data->app);
+    }
+
+    g_free(data->filepath);
+    g_free(data);
+    gtk_window_destroy(GTK_WINDOW(dialog));
 }
 
-/* Sidebar navigation */
-static void on_sidebar_clicked(GtkButton *button, gpointer data)
+static void show_editor(App *app, const gchar *filepath)
 {
-    const char *path = data;
-    navigate_to(path);
+    gchar *contents = NULL;
+
+    if (!g_file_get_contents(filepath, &contents, NULL, NULL))
+        contents = g_strdup("");
+
+    GtkWidget *dialog = gtk_dialog_new();
+
+    gtk_window_set_title(GTK_WINDOW(dialog), "Text Editor");
+    gtk_window_set_transient_for(
+        GTK_WINDOW(dialog), GTK_WINDOW(app->window));
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 650, 450);
+
+    gtk_dialog_add_button(
+        GTK_DIALOG(dialog), "Cancel", GTK_RESPONSE_CANCEL);
+    gtk_dialog_add_button(
+        GTK_DIALOG(dialog), "Save", GTK_RESPONSE_ACCEPT);
+
+    GtkWidget *content = gtk_dialog_get_content_area(
+        GTK_DIALOG(dialog));
+
+    GtkWidget *scrolled = gtk_scrolled_window_new();
+    gtk_widget_set_vexpand(scrolled, TRUE);
+    gtk_widget_set_hexpand(scrolled, TRUE);
+    gtk_widget_set_margin_start(scrolled, 10);
+    gtk_widget_set_margin_end(scrolled, 10);
+    gtk_widget_set_margin_top(scrolled, 10);
+    gtk_widget_set_margin_bottom(scrolled, 10);
+
+    GtkWidget *text_view = gtk_text_view_new();
+    gtk_text_view_set_wrap_mode(
+        GTK_TEXT_VIEW(text_view), GTK_WRAP_WORD_CHAR);
+
+    gtk_text_buffer_set_text(
+        gtk_text_view_get_buffer(GTK_TEXT_VIEW(text_view)),
+        contents, -1);
+
+    gtk_scrolled_window_set_child(
+        GTK_SCROLLED_WINDOW(scrolled), text_view);
+    gtk_box_append(GTK_BOX(content), scrolled);
+
+    EditorData *data = g_new0(EditorData, 1);
+    data->app = app;
+    data->filepath = g_strdup(filepath);
+    data->text_view = text_view;
+
+    g_signal_connect(dialog, "response",
+                     G_CALLBACK(editor_response), data);
+
+    g_free(contents);
+    gtk_window_present(GTK_WINDOW(dialog));
 }
 
-/* Go to parent directory */
-static void on_up_clicked(GtkButton *button, gpointer data)
+static void prompt_response(GtkDialog *dialog, int response,
+                            gpointer user_data)
 {
-    if (current_path == NULL)
+    PromptData *data = user_data;
+    App *app = data->app;
+
+    if (response == GTK_RESPONSE_ACCEPT) {
+        GtkWidget *entry = g_object_get_data(
+            G_OBJECT(dialog), "entry");
+        const gchar *name = gtk_editable_get_text(
+            GTK_EDITABLE(entry));
+
+        if (!name || !*name || strchr(name, '/')) {
+            set_status(app, "Invalid name.");
+        } else {
+            gchar *new_path = full_path(app, name);
+            gchar *old_path = data->old_name
+                ? full_path(app, data->old_name) : NULL;
+            gboolean ok = FALSE;
+
+            if (g_str_equal(data->action, "New File")) {
+                FILE *f = g_fopen(new_path, "wx");
+                if (f) {
+                    fclose(f);
+                    ok = TRUE;
+                }
+            } else if (g_str_equal(data->action, "New Folder")) {
+                ok = (g_mkdir(new_path, 0755) == 0);
+            } else if (g_str_equal(data->action, "Rename")) {
+                ok = (g_rename(old_path, new_path) == 0);
+            }
+
+            if (ok)
+                set_status(app, "Operation completed.");
+            else
+                set_status(app, "Operation failed. Check name or permissions.");
+
+            g_free(new_path);
+            g_free(old_path);
+            refresh_files(app);
+        }
+    }
+
+    g_free(data->action);
+    g_free(data->old_name);
+    g_free(data);
+    gtk_window_destroy(GTK_WINDOW(dialog));
+}
+
+static void show_prompt(App *app, const gchar *action,
+                        const gchar *old_name)
+{
+    GtkWidget *dialog = gtk_dialog_new();
+
+    gtk_window_set_title(GTK_WINDOW(dialog), action);
+    gtk_window_set_transient_for(
+        GTK_WINDOW(dialog), GTK_WINDOW(app->window));
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+
+    gtk_dialog_add_button(
+        GTK_DIALOG(dialog), "Cancel", GTK_RESPONSE_CANCEL);
+    gtk_dialog_add_button(
+        GTK_DIALOG(dialog), "OK", GTK_RESPONSE_ACCEPT);
+
+    GtkWidget *content = gtk_dialog_get_content_area(
+        GTK_DIALOG(dialog));
+
+    GtkWidget *entry = gtk_entry_new();
+    gtk_entry_set_placeholder_text(
+        GTK_ENTRY(entry), "Enter name");
+
+    if (old_name)
+        gtk_editable_set_text(
+            GTK_EDITABLE(entry), old_name);
+
+    gtk_widget_set_margin_start(entry, 12);
+    gtk_widget_set_margin_end(entry, 12);
+    gtk_widget_set_margin_top(entry, 12);
+    gtk_widget_set_margin_bottom(entry, 12);
+
+    gtk_box_append(GTK_BOX(content), entry);
+    g_object_set_data(G_OBJECT(dialog), "entry", entry);
+
+    PromptData *data = g_new0(PromptData, 1);
+    data->app = app;
+    data->action = g_strdup(action);
+    data->old_name = g_strdup(old_name);
+
+    g_signal_connect(dialog, "response",
+                     G_CALLBACK(prompt_response), data);
+
+    gtk_window_present(GTK_WINDOW(dialog));
+}
+
+static void create_file(GtkButton *button, gpointer user_data)
+{
+    show_prompt(user_data, "New File", NULL);
+}
+
+static void create_folder(GtkButton *button, gpointer user_data)
+{
+    show_prompt(user_data, "New Folder", NULL);
+}
+
+static void rename_item(GtkButton *button, gpointer user_data)
+{
+    App *app = user_data;
+    gchar *name = selected_name(app);
+
+    if (!name) {
+        set_status(app, "Select an item first.");
+        return;
+    }
+
+    show_prompt(app, "Rename", name);
+    g_free(name);
+}
+
+static void delete_item(GtkButton *button, gpointer user_data)
+{
+    App *app = user_data;
+    gchar *name = selected_name(app);
+
+    if (!name) {
+        set_status(app, "Select an item first.");
+        return;
+    }
+
+    gchar *path = full_path(app, name);
+    gboolean is_dir = g_file_test(path, G_FILE_TEST_IS_DIR);
+    gint result = is_dir ? g_rmdir(path) : g_remove(path);
+
+    if (result == 0)
+        set_status(app, "Item deleted.");
+    else
+        set_status(app, is_dir
+            ? "Could not delete folder. It must be empty."
+            : "Could not delete file.");
+
+    g_free(name);
+    g_free(path);
+    refresh_files(app);
+}
+
+static void edit_item(GtkButton *button, gpointer user_data)
+{
+    App *app = user_data;
+    gchar *name = selected_name(app);
+
+    if (!name) {
+        set_status(app, "Select a file first.");
+        return;
+    }
+
+    gchar *path = full_path(app, name);
+
+    if (g_file_test(path, G_FILE_TEST_IS_DIR)) {
+        set_status(app, "Select a file, not a folder.");
+    } else {
+        show_editor(app, path);
+    }
+
+    g_free(path);
+    g_free(name);
+}
+
+static void open_selected(GtkListBox *list, GtkListBoxRow *row,
+                          gpointer user_data)
+{
+    App *app = user_data;
+    const gchar *name = g_object_get_data(
+        G_OBJECT(row), "filename");
+
+    if (!name)
         return;
 
-    char *parent = g_path_get_dirname(current_path);
+    gchar *path = full_path(app, name);
 
-    navigate_to(parent);
+    if (g_file_test(path, G_FILE_TEST_IS_DIR)) {
+        g_free(app->current_path);
+        app->current_path = g_strdup(path);
+        refresh_files(app);
+    } else {
+        show_editor(app, path);
+    }
 
-    g_free(parent);
+    g_free(path);
 }
 
-/* Refresh button */
-static void on_refresh_clicked(GtkButton *button, gpointer data)
+static void go_up(GtkButton *button, gpointer user_data)
 {
-    refresh_directory();
+    App *app = user_data;
+    gchar *parent = g_path_get_dirname(app->current_path);
+
+    if (g_strcmp0(parent, app->current_path) != 0) {
+        g_free(app->current_path);
+        app->current_path = parent;
+        refresh_files(app);
+    } else {
+        g_free(parent);
+    }
 }
 
-/* Create sidebar button */
-static GtkWidget *create_sidebar_button(
-    const char *label,
-    const char *icon_name,
-    const char *path)
+static void go_to_path(GtkButton *button, gpointer user_data)
 {
-    GtkWidget *button = gtk_button_new();
-    GtkWidget *box =
-        gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    App *app = user_data;
+    const gchar *path = gtk_editable_get_text(
+        GTK_EDITABLE(app->path_entry));
 
-    GtkWidget *icon =
-        gtk_image_new_from_icon_name(icon_name);
+    if (g_file_test(path, G_FILE_TEST_IS_DIR)) {
+        g_free(app->current_path);
+        app->current_path = g_canonicalize_filename(path, NULL);
+        refresh_files(app);
+    } else {
+        set_status(app, "Directory does not exist.");
+    }
+}
 
-    GtkWidget *text = gtk_label_new(label);
+static void refresh_clicked(GtkButton *button, gpointer user_data)
+{
+    refresh_files(user_data);
+}
 
-    gtk_label_set_xalign(GTK_LABEL(text), 0);
-    gtk_widget_set_hexpand(text, TRUE);
-
-    gtk_box_append(GTK_BOX(box), icon);
-    gtk_box_append(GTK_BOX(box), text);
-
-    gtk_button_set_child(GTK_BUTTON(button), box);
-
-    g_signal_connect(
-        button, "clicked",
-        G_CALLBACK(on_sidebar_clicked),
-        (gpointer)path);
-
+static GtkWidget *make_button(const gchar *text, GtkWidget *box,
+                              GCallback callback, App *app)
+{
+    GtkWidget *button = gtk_button_new_with_label(text);
+    gtk_box_append(GTK_BOX(box), button);
+    g_signal_connect(button, "clicked", callback, app);
     return button;
 }
 
-/* Main window */
-static void activate(GtkApplication *app, gpointer user_data)
+static void activate(GtkApplication *application, gpointer user_data)
 {
-    window = gtk_application_window_new(app);
+    App *app = user_data;
 
-    gtk_window_set_title(
-        GTK_WINDOW(window), "File System Interface");
+    app->current_path = g_get_current_dir();
 
-    gtk_window_set_default_size(
-        GTK_WINDOW(window), 1000, 650);
+    app->window = gtk_application_window_new(application);
+    gtk_window_set_title(GTK_WINDOW(app->window),
+                         "File System Interface");
+    gtk_window_set_default_size(GTK_WINDOW(app->window), 900, 600);
 
-    /* Main layout */
-    GtkWidget *main_box =
-        gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_margin_start(main_box, 12);
+    gtk_widget_set_margin_end(main_box, 12);
+    gtk_widget_set_margin_top(main_box, 12);
+    gtk_widget_set_margin_bottom(main_box, 12);
 
-    gtk_window_set_child(GTK_WINDOW(window), main_box);
+    gtk_window_set_child(GTK_WINDOW(app->window), main_box);
 
-    /* Toolbar */
-    GtkWidget *toolbar =
-        gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-
-    gtk_widget_set_margin_start(toolbar, 12);
-    gtk_widget_set_margin_end(toolbar, 12);
-    gtk_widget_set_margin_top(toolbar, 10);
-    gtk_widget_set_margin_bottom(toolbar, 10);
-
+    GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     gtk_box_append(GTK_BOX(main_box), toolbar);
 
-    GtkWidget *up_button =
-        gtk_button_new_from_icon_name("go-up-symbolic");
+    make_button("New File", toolbar, G_CALLBACK(create_file), app);
+    make_button("New Folder", toolbar, G_CALLBACK(create_folder), app);
+    make_button("Edit", toolbar, G_CALLBACK(edit_item), app);
+    make_button("Rename", toolbar, G_CALLBACK(rename_item), app);
+    make_button("Delete", toolbar, G_CALLBACK(delete_item), app);
+    make_button("Up", toolbar, G_CALLBACK(go_up), app);
+    make_button("Refresh", toolbar, G_CALLBACK(refresh_clicked), app);
 
-    gtk_widget_set_tooltip_text(
-        up_button, "Go to parent folder");
+    GtkWidget *path_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_append(GTK_BOX(main_box), path_box);
 
-    g_signal_connect(
-        up_button, "clicked",
-        G_CALLBACK(on_up_clicked), NULL);
+    app->path_entry = gtk_entry_new();
+    gtk_widget_set_hexpand(app->path_entry, TRUE);
+    gtk_box_append(GTK_BOX(path_box), app->path_entry);
 
-    gtk_box_append(GTK_BOX(toolbar), up_button);
+    make_button("Go", path_box, G_CALLBACK(go_to_path), app);
 
-    path_entry = gtk_entry_new();
+    GtkWidget *scrolled = gtk_scrolled_window_new();
+    gtk_widget_set_vexpand(scrolled, TRUE);
+    gtk_box_append(GTK_BOX(main_box), scrolled);
 
-    gtk_entry_set_placeholder_text(
-        GTK_ENTRY(path_entry), "Enter directory path");
-
-    gtk_widget_set_hexpand(path_entry, TRUE);
-
-    g_signal_connect(
-        path_entry, "activate",
-        G_CALLBACK(on_path_enter), NULL);
-
-    gtk_box_append(GTK_BOX(toolbar), path_entry);
-
-    GtkWidget *refresh_button =
-        gtk_button_new_from_icon_name("view-refresh-symbolic");
-
-    gtk_widget_set_tooltip_text(
-        refresh_button, "Refresh");
-
-    g_signal_connect(
-        refresh_button, "clicked",
-        G_CALLBACK(on_refresh_clicked), NULL);
-
-    gtk_box_append(GTK_BOX(toolbar), refresh_button);
-
-    /* Main content area */
-    GtkWidget *content =
-        gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-
-    gtk_widget_set_vexpand(content, TRUE);
-
-    gtk_box_append(GTK_BOX(main_box), content);
-
-    /* Sidebar */
-    GtkWidget *sidebar =
-        gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
-
-    gtk_widget_set_size_request(sidebar, 210, -1);
-    gtk_widget_set_margin_start(sidebar, 12);
-    gtk_widget_set_margin_end(sidebar, 12);
-    gtk_widget_set_margin_top(sidebar, 12);
-
-    gtk_box_append(GTK_BOX(content), sidebar);
-
-    GtkWidget *places_label = gtk_label_new("Places");
-
-    gtk_label_set_xalign(GTK_LABEL(places_label), 0);
-
-    gtk_box_append(GTK_BOX(sidebar), places_label);
-
-    const char *home = g_get_home_dir();
-
-    char *documents =
-        g_build_filename(home, "Documents", NULL);
-
-    char *downloads =
-        g_build_filename(home, "Downloads", NULL);
-
-    gtk_box_append(
-        GTK_BOX(sidebar),
-        create_sidebar_button(
-            "Home", "user-home-symbolic", home));
-
-    gtk_box_append(
-        GTK_BOX(sidebar),
-        create_sidebar_button(
-            "Documents", "folder-documents-symbolic",
-            documents));
-
-    gtk_box_append(
-        GTK_BOX(sidebar),
-        create_sidebar_button(
-            "Downloads", "folder-download-symbolic",
-            downloads));
-
-    g_free(documents);
-    g_free(downloads);
-
-    /* Separator */
-    GtkWidget *separator =
-        gtk_separator_new(GTK_ORIENTATION_VERTICAL);
-
-    gtk_box_append(GTK_BOX(content), separator);
-
-    /* File browser */
-    GtkWidget *browser =
-        gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
-
-    gtk_widget_set_hexpand(browser, TRUE);
-    gtk_widget_set_vexpand(browser, TRUE);
-
-    gtk_widget_set_margin_start(browser, 16);
-    gtk_widget_set_margin_end(browser, 16);
-    gtk_widget_set_margin_top(browser, 12);
-    gtk_widget_set_margin_bottom(browser, 12);
-
-    gtk_box_append(GTK_BOX(content), browser);
-
-    location_label = gtk_label_new("Home");
-
-    gtk_label_set_xalign(GTK_LABEL(location_label), 0);
-
-    gtk_box_append(GTK_BOX(browser), location_label);
-
-    GtkWidget *scroll = gtk_scrolled_window_new();
-
-    gtk_widget_set_vexpand(scroll, TRUE);
-
-    file_list = gtk_list_box_new();
-
+    app->list = gtk_list_box_new();
     gtk_list_box_set_selection_mode(
-        GTK_LIST_BOX(file_list), GTK_SELECTION_SINGLE);
-
-    g_signal_connect(
-        file_list, "row-activated",
-        G_CALLBACK(on_row_activated), NULL);
-
+        GTK_LIST_BOX(app->list), GTK_SELECTION_SINGLE);
     gtk_scrolled_window_set_child(
-        GTK_SCROLLED_WINDOW(scroll), file_list);
+        GTK_SCROLLED_WINDOW(scrolled), app->list);
 
-    gtk_box_append(GTK_BOX(browser), scroll);
+    g_signal_connect(app->list, "row-activated",
+                     G_CALLBACK(open_selected), app);
 
-    /* Status bar */
-    status_label =
-        GTK_LABEL(gtk_label_new("Ready"));
+    app->status = gtk_label_new("Ready");
+    gtk_label_set_xalign(GTK_LABEL(app->status), 0);
+    gtk_box_append(GTK_BOX(main_box), app->status);
 
-    gtk_widget_set_margin_start(
-        GTK_WIDGET(status_label), 12);
-
-    gtk_widget_set_margin_top(
-        GTK_WIDGET(status_label), 8);
-
-    gtk_widget_set_margin_bottom(
-        GTK_WIDGET(status_label), 8);
-
-    gtk_label_set_xalign(status_label, 0);
-
-    gtk_box_append(
-        GTK_BOX(main_box), GTK_WIDGET(status_label));
-
-    /* Start in home directory */
-    navigate_to(home);
-
-    gtk_window_present(GTK_WINDOW(window));
+    refresh_files(app);
+    gtk_window_present(GTK_WINDOW(app->window));
 }
 
-/* Main function */
 int main(int argc, char **argv)
 {
-    GtkApplication *app = gtk_application_new(
-        "com.osproject.filesystem",
+    App app = {0};
+
+    GtkApplication *application = gtk_application_new(
+        "com.osmini.filesystem",
         G_APPLICATION_DEFAULT_FLAGS);
 
-    g_signal_connect(
-        app, "activate",
-        G_CALLBACK(activate), NULL);
+    g_signal_connect(application, "activate",
+                     G_CALLBACK(activate), &app);
 
     int status = g_application_run(
-        G_APPLICATION(app), argc, argv);
+        G_APPLICATION(application), argc, argv);
 
-    g_free(current_path);
-    g_object_unref(app);
+    g_object_unref(application);
+    g_free(app.current_path);
 
     return status;
 }
