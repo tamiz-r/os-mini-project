@@ -2,269 +2,373 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <errno.h>
-#include <ctype.h>
 
 #ifdef _WIN32
-    #include <windows.h>
-    #include <direct.h>
-    #define MAKE_DIR(path) _mkdir(path)
+#include <direct.h>
+#include <io.h>
+#define make_dir(path) _mkdir(path)
+#define change_dir(path) _chdir(path)
+#define get_dir(path, size) _getcwd(path, size)
+#define remove_dir(path) _rmdir(path)
 #else
-    #include <dirent.h>
-    #include <sys/stat.h>
-    #define MAKE_DIR(path) mkdir(path, 0755)
+#include <unistd.h>
+#define make_dir(path) mkdir(path, 0777)
+#define change_dir(path) chdir(path)
+#define get_dir(path, size) getcwd(path, size)
+#define remove_dir(path) rmdir(path)
 #endif
 
-#define MAX 512
+#define SIZE 1024
 
-// ---------- Utility ----------
-void trimNewline(char *s) {
-    s[strcspn(s, "\r\n")] = '\0';
+char current_path[SIZE];
+
+/* Remove newline from input */
+void trim_newline(char *str) {
+    str[strcspn(str, "\n")] = '\0';
 }
 
-void getInput(const char *message, char *buffer, size_t size) {
+/* Get string input */
+void get_input(const char *message, char *buffer, size_t size) {
     printf("%s", message);
-    if (fgets(buffer, size, stdin) == NULL) {
+    if (fgets(buffer, size, stdin) != NULL) {
+        trim_newline(buffer);
+    } else {
         buffer[0] = '\0';
-        return;
     }
-    trimNewline(buffer);
 }
 
-// ---------- Create File ----------
-void createFile() {
-    char name[MAX];
-    getInput("Enter filename: ", name, sizeof(name));
+/* List files and directories */
+void list_files(void) {
+    DIR *dir = opendir(".");
+    struct dirent *entry;
 
-    FILE *fp = fopen(name, "wx");
-    if (!fp) {
-        perror("Cannot create file");
+    if (dir == NULL) {
+        perror("Cannot open directory");
         return;
     }
 
-    fclose(fp);
+    printf("\n--- Files and Directories ---\n");
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        printf("%s\n", entry->d_name);
+    }
+
+    closedir(dir);
+}
+
+/* Create a new file */
+void create_file(void) {
+    char name[SIZE];
+    get_input("Enter file name: ", name, sizeof(name));
+
+    FILE *file = fopen(name, "wx");
+
+    if (file == NULL) {
+        perror("File creation failed");
+        return;
+    }
+
+    fclose(file);
     printf("File created successfully.\n");
 }
 
-// ---------- Read File ----------
-void readFile() {
-    char name[MAX], buffer[MAX];
-    getInput("Enter filename: ", name, sizeof(name));
+/* Read file sequentially */
+void read_file(void) {
+    char name[SIZE];
+    char buffer[SIZE];
 
-    FILE *fp = fopen(name, "r");
-    if (!fp) {
-        perror("Cannot open file");
+    get_input("Enter file name: ", name, sizeof(name));
+
+    FILE *file = fopen(name, "r");
+
+    if (file == NULL) {
+        perror("File open failed");
         return;
     }
 
     printf("\n--- File Contents ---\n");
-    while (fgets(buffer, sizeof(buffer), fp))
-        printf("%s", buffer);
 
-    fclose(fp);
-    printf("\n---------------------\n");
+    while (fgets(buffer, sizeof(buffer), file) != NULL) {
+        printf("%s", buffer);
+    }
+
+    printf("\n");
+    fclose(file);
 }
 
-// ---------- Write File ----------
-void writeFile() {
-    char name[MAX], content[MAX];
-    getInput("Enter filename: ", name, sizeof(name));
+/* Write or overwrite a file */
+void write_file(void) {
+    char name[SIZE];
+    char content[SIZE];
 
-    FILE *fp = fopen(name, "w");
-    if (!fp) {
-        perror("Cannot open file");
+    get_input("Enter file name: ", name, sizeof(name));
+    get_input("Enter content: ", content, sizeof(content));
+
+    FILE *file = fopen(name, "w");
+
+    if (file == NULL) {
+        perror("File write failed");
         return;
     }
 
-    getInput("Enter content: ", content, sizeof(content));
+    fprintf(file, "%s\n", content);
+    fclose(file);
 
-    if (fprintf(fp, "%s\n", content) < 0)
-        perror("Write failed");
-    else
-        printf("Content written successfully.\n");
-
-    fclose(fp);
+    printf("File written successfully.\n");
 }
 
-// ---------- Delete File ----------
-void deleteFile() {
-    char name[MAX];
-    getInput("Enter filename to delete: ", name, sizeof(name));
+/* Append content to a file */
+void append_file(void) {
+    char name[SIZE];
+    char content[SIZE];
+
+    get_input("Enter file name: ", name, sizeof(name));
+    get_input("Enter content to append: ", content, sizeof(content));
+
+    FILE *file = fopen(name, "a");
+
+    if (file == NULL) {
+        perror("File open failed");
+        return;
+    }
+
+    fprintf(file, "%s\n", content);
+    fclose(file);
+
+    printf("Content appended successfully.\n");
+}
+
+/* Delete a file */
+void delete_file(void) {
+    char name[SIZE];
+
+    get_input("Enter file name: ", name, sizeof(name));
 
     if (remove(name) == 0)
         printf("File deleted successfully.\n");
     else
-        perror("Delete failed");
+        perror("File deletion failed");
 }
 
-// ---------- Create Directory ----------
-void createDirectory() {
-    char name[MAX];
-    getInput("Enter directory name: ", name, sizeof(name));
+/* Create a directory */
+void create_directory(void) {
+    char name[SIZE];
 
-    if (MAKE_DIR(name) == 0)
+    get_input("Enter directory name: ", name, sizeof(name));
+
+    if (make_dir(name) == 0)
         printf("Directory created successfully.\n");
     else
         perror("Directory creation failed");
 }
 
-// ---------- List Directory ----------
-void listFiles() {
-    char path[MAX];
-    getInput("Enter directory path (use . for current): ",
-             path, sizeof(path));
+/* Rename a file or directory */
+void rename_item(void) {
+    char old_name[SIZE];
+    char new_name[SIZE];
 
-#ifdef _WIN32
-    char pattern[MAX];
-    snprintf(pattern, sizeof(pattern), "%s\\*", path);
+    get_input("Enter current name: ", old_name, sizeof(old_name));
+    get_input("Enter new name: ", new_name, sizeof(new_name));
 
-    WIN32_FIND_DATAA data;
-    HANDLE h = FindFirstFileA(pattern, &data);
-
-    if (h == INVALID_HANDLE_VALUE) {
-        printf("Cannot open directory.\n");
-        return;
-    }
-
-    printf("\nDirectory contents:\n");
-    do {
-        printf("%s\n", data.cFileName);
-    } while (FindNextFileA(h, &data));
-
-    FindClose(h);
-
-#else
-    DIR *dir = opendir(path);
-    if (!dir) {
-        perror("Cannot open directory");
-        return;
-    }
-
-    struct dirent *entry;
-    printf("\nDirectory contents:\n");
-
-    while ((entry = readdir(dir)) != NULL)
-        printf("%s\n", entry->d_name);
-
-    closedir(dir);
-#endif
+    if (rename(old_name, new_name) == 0)
+        printf("Renamed successfully.\n");
+    else
+        perror("Rename failed");
 }
 
-// ---------- Sequential Access ----------
-void sequentialAccess() {
-    char name[MAX], buffer[MAX];
-    getInput("Enter filename: ", name, sizeof(name));
+/* Remove an empty directory */
+void delete_directory(void) {
+    char name[SIZE];
 
-    FILE *fp = fopen(name, "rb");
-    if (!fp) {
-        perror("Cannot open file");
+    get_input("Enter directory name: ", name, sizeof(name));
+
+    if (remove_dir(name) == 0)
+        printf("Directory deleted successfully.\n");
+    else
+        perror("Directory deletion failed (it may not be empty)");
+}
+
+/* Change current directory */
+void navigate_directory(void) {
+    char path[SIZE];
+
+    get_input("Enter directory path (.. for parent): ",
+              path, sizeof(path));
+
+    if (change_dir(path) == 0) {
+        if (get_dir(current_path, sizeof(current_path)) != NULL)
+            printf("Current directory: %s\n", current_path);
+    } else {
+        perror("Directory change failed");
+    }
+}
+
+/* Direct access: read bytes from a specified offset */
+void direct_read(void) {
+    char name[SIZE];
+    long offset;
+    int count;
+
+    get_input("Enter file name: ", name, sizeof(name));
+
+    printf("Enter byte offset: ");
+    if (scanf("%ld", &offset) != 1) {
+        printf("Invalid offset.\n");
+        while (getchar() != '\n');
         return;
     }
 
-    printf("\nSequential reading:\n");
+    printf("Enter number of bytes to read: ");
+    if (scanf("%d", &count) != 1 || count <= 0 || count > 4096) {
+        printf("Invalid byte count (1-4096).\n");
+        while (getchar() != '\n');
+        return;
+    }
+    while (getchar() != '\n');
 
-    size_t n;
-    while ((n = fread(buffer, 1, sizeof(buffer), fp)) > 0)
-        fwrite(buffer, 1, n, stdout);
+    FILE *file = fopen(name, "rb");
 
-    fclose(fp);
-    printf("\n");
+    if (file == NULL) {
+        perror("File open failed");
+        return;
+    }
+
+    if (fseek(file, offset, SEEK_SET) != 0) {
+        perror("Seek failed");
+        fclose(file);
+        return;
+    }
+
+    unsigned char *buffer = malloc((size_t)count);
+    if (buffer == NULL) {
+        printf("Memory allocation failed.\n");
+        fclose(file);
+        return;
+    }
+
+    size_t bytes = fread(buffer, 1, (size_t)count, file);
+
+    printf("\n--- Data at offset %ld ---\n", offset);
+    for (size_t i = 0; i < bytes; i++)
+        printf("%02X ", buffer[i]);
+
+    printf("\nBytes read: %zu\n", bytes);
+
+    free(buffer);
+    fclose(file);
 }
 
-// ---------- Direct Access ----------
-void directAccess() {
-    char name[MAX], input[64];
+/* Direct access: write bytes at a specified offset */
+void direct_write(void) {
+    char name[SIZE];
+    char data[SIZE];
     long offset;
 
-    getInput("Enter filename: ", name, sizeof(name));
-    getInput("Enter byte offset: ", input, sizeof(input));
+    get_input("Enter file name: ", name, sizeof(name));
 
-    char *end;
-    errno = 0;
-    offset = strtol(input, &end, 10);
-
-    while (isspace((unsigned char)*end))
-        end++;
-
-    if (errno || end == input || *end != '\0' || offset < 0) {
+    printf("Enter byte offset: ");
+    if (scanf("%ld", &offset) != 1 || offset < 0) {
         printf("Invalid offset.\n");
+        while (getchar() != '\n');
+        return;
+    }
+    while (getchar() != '\n');
+
+    get_input("Enter text to write: ", data, sizeof(data));
+
+    FILE *file = fopen(name, "r+b");
+
+    if (file == NULL) {
+        perror("File open failed (file must exist)");
         return;
     }
 
-    FILE *fp = fopen(name, "rb");
-    if (!fp) {
-        perror("Cannot open file");
-        return;
-    }
-
-    if (fseek(fp, offset, SEEK_SET) != 0) {
+    if (fseek(file, offset, SEEK_SET) != 0) {
         perror("Seek failed");
-        fclose(fp);
+        fclose(file);
         return;
     }
 
-    char buffer[MAX];
-    size_t n = fread(buffer, 1, sizeof(buffer), fp);
+    size_t len = strlen(data);
+    size_t written = fwrite(data, 1, len, file);
 
-    printf("\nData from byte offset %ld:\n", offset);
-    if (n > 0)
-        fwrite(buffer, 1, n, stdout);
-    else if (ferror(fp))
-        perror("Read failed");
+    fclose(file);
+
+    if (written == len)
+        printf("Data written at offset %ld.\n", offset);
     else
-        printf("End of file reached.\n");
-
-    printf("\n");
-    fclose(fp);
+        printf("Write was incomplete.\n");
 }
 
-// ---------- Main Menu ----------
-int main() {
-    char input[64];
+/* Display menu */
+void display_menu(void) {
+    printf("\n========== FILE SYSTEM INTERFACE ==========\n");
+    printf("Current Directory: %s\n", current_path);
+    printf("-------------------------------------------\n");
+    printf("1.  List Files and Directories\n");
+    printf("2.  Create File\n");
+    printf("3.  Read File (Sequential Access)\n");
+    printf("4.  Write File (Overwrite)\n");
+    printf("5.  Append to File\n");
+    printf("6.  Delete File\n");
+    printf("7.  Create Directory\n");
+    printf("8.  Rename File or Directory\n");
+    printf("9.  Delete Empty Directory\n");
+    printf("10. Change Directory\n");
+    printf("11. Direct Read (Byte Offset)\n");
+    printf("12. Direct Write (Byte Offset)\n");
+    printf("0.  Exit\n");
+    printf("===========================================\n");
+}
+
+int main(void) {
     int choice;
 
+    if (get_dir(current_path, sizeof(current_path)) == NULL) {
+        strcpy(current_path, ".");
+    }
+
+    printf("Welcome to the File System Interface!\n");
+
     while (1) {
-        printf("\n================================\n");
-        printf("    OS FILE SYSTEM INTERFACE\n");
-        printf("================================\n");
-        printf("1. Create File\n");
-        printf("2. Read File\n");
-        printf("3. Write File\n");
-        printf("4. Delete File\n");
-        printf("5. Create Directory\n");
-        printf("6. List Directory\n");
-        printf("7. Sequential Access\n");
-        printf("8. Direct Access\n");
-        printf("0. Exit\n");
-        printf("--------------------------------\n");
+        display_menu();
 
-        getInput("Enter choice: ", input, sizeof(input));
+        printf("Enter your choice: ");
 
-        char *end;
-        long value = strtol(input, &end, 10);
-        while (isspace((unsigned char)*end))
-            end++;
-
-        if (end == input || *end != '\0' ||
-            value < 0 || value > 8) {
-            printf("Invalid choice.\n");
+        if (scanf("%d", &choice) != 1) {
+            printf("Invalid input. Enter a number.\n");
+            while (getchar() != '\n');
             continue;
         }
-
-        choice = (int)value;
+        while (getchar() != '\n');
 
         switch (choice) {
-            case 1: createFile(); break;
-            case 2: readFile(); break;
-            case 3: writeFile(); break;
-            case 4: deleteFile(); break;
-            case 5: createDirectory(); break;
-            case 6: listFiles(); break;
-            case 7: sequentialAccess(); break;
-            case 8: directAccess(); break;
+            case 1:  list_files();       break;
+            case 2:  create_file();      break;
+            case 3:  read_file();        break;
+            case 4:  write_file();       break;
+            case 5:  append_file();      break;
+            case 6:  delete_file();      break;
+            case 7:  create_directory(); break;
+            case 8:  rename_item();      break;
+            case 9:  delete_directory(); break;
+            case 10: navigate_directory(); break;
+            case 11: direct_read();      break;
+            case 12: direct_write();     break;
             case 0:
-                printf("Exiting program.\n");
+                printf("Exiting File System Interface.\n");
                 return 0;
+            default:
+                printf("Invalid choice. Try again.\n");
         }
     }
+
+    return 0;
 }
